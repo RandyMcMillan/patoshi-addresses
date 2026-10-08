@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+# 1. Create a virtual environment named 'venv'
+python3 -m venv venv
+
+# 2. Activate the virtual environment
+source venv/bin/activate
+
+# 3. Install the required dependency
+pip install requests matplotlib numpy >/dev/null
+
+# Flags are passed through to the extractor, for example: --resume, --start-block 100000, --output custom.csv
+
+# 4. Execute the script
+python3 ./extract_patoshi_addresses.py "$@"
+python3 ./plot_patoshi_xor.py
+python3 ./plot_patoshi_xor.py --mode curve-combine
+python3 ./plot_patoshi_xor.py --mode xor-curve

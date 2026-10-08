@@ -1,0 +1,887 @@
+DOCKER_CLI := env("DOCKER_CLI", "docker")
+IMAGE_NAME := env("IMAGE_NAME", "rustfs:v1.0.0")
+DOCKERFILE_SOURCE := env("DOCKERFILE_SOURCE", "Dockerfile.source")
+DOCKERFILE_PRODUCTION := env("DOCKERFILE_PRODUCTION", "Dockerfile")
+CONTAINER_NAME := env("CONTAINER_NAME", "rustfs-dev")
+
+# Directory where this justfile is located
+justfile_dir := justfile_directory()
+
+# Parent directory of the justfile
+parent_dir := parent_directory(justfile_dir)
+
+abs_repo := canonicalize('../')
+
+[group("📒 Help")]
+[private]
+default:
+    @echo "Justfile Directory: {{justfile_dir}}"
+    @echo "Parent Directory:   {{parent_dir}}"
+    @echo "Absolute Repo Path:  {{abs_repo}}"
+    @just --list --list-heading $'🦀 RustFS justfile manual page:\n'
+
+[doc("show help")]
+[group("📒 Help")]
+help: default
+
+[doc("run `cargo fmt` to format codes")]
+[group("👆 Code Quality")]
+fmt:
+    @echo "🔧 Formatting code..."
+    cargo fmt --all
+
+[doc("run `cargo fmt` in check mode")]
+[group("👆 Code Quality")]
+fmt-check:
+    @echo "📝 Checking code formatting..."
+    cargo fmt --all --check
+
+[doc("run `cargo clippy`")]
+[group("👆 Code Quality")]
+clippy:
+    @echo "🔍 Running clippy checks..."
+    cargo clippy --all-targets --all-features --fix --allow-dirty -- -D warnings
+
+[doc("run `cargo check`")]
+[group("👆 Code Quality")]
+check:
+    @echo "🔨 Running compilation check..."
+    cargo check --all-targets
+
+[doc("run `cargo test`")]
+[group("👆 Code Quality")]
+test:
+    @echo "🧪 Running tests..."
+    cargo nextest run --all --exclude e2e_test
+    cargo test --all --doc
+
+[doc("run `fmt` `clippy` `check` `test` at once")]
+[group("👆 Code Quality")]
+pre-commit: fmt clippy check test
+    @echo "✅ All pre-commit checks passed!"
+
+[group("🤔 Git")]
+setup-hooks:
+    @echo "🔧 Setting up git hooks..."
+    mkdir -p .git/hooks
+    cp ./githooks/* .git/hooks/
+    chmod +x .git/hooks/pre-commit
+    @echo "✅ Git hooks setup complete!"
+
+[doc("use `release` mode for building")]
+[group("🔨 Build")]
+build:
+    @echo "🔨 Building RustFS using build-rustfs.sh script..."
+    ./build-rustfs.sh
+
+[doc("use `debug` mode for building")]
+[group("🔨 Build")]
+build-dev:
+    @echo "🔨 Building RustFS in development mode..."
+    ./build-rustfs.sh --dev
+
+[group("🔨 Build")]
+[private]
+build-target target:
+    @echo "🔨 Building rustfs for {{ target }}..."
+    @echo "💡 On macOS/Windows, use 'make build-docker' or 'make docker-dev' instead"
+    ./build-rustfs.sh --platform {{ target }}
+
+[doc("use `x86_64-unknown-linux-musl` target for building")]
+[group("🔨 Build")]
+build-musl: (build-target "x86_64-unknown-linux-musl")
+
+[doc("use `x86_64-unknown-linux-gnu` target for building")]
+[group("🔨 Build")]
+build-gnu: (build-target "x86_64-unknown-linux-gnu")
+
+[doc("use `aarch64-unknown-linux-musl` target for building")]
+[group("🔨 Build")]
+build-musl-arm64: (build-target "aarch64-unknown-linux-musl")
+
+[doc("use `aarch64-unknown-linux-gnu` target for building")]
+[group("🔨 Build")]
+build-gnu-arm64: (build-target "aarch64-unknown-linux-gnu")
+
+[doc("build and deploy to server")]
+[group("🔨 Build")]
+deploy-dev ip: build-musl
+    @echo "🚀 Deploying to dev server: {{ ip }}"
+    ./scripts/dev_deploy.sh {{ ip }}
+
+[group("🔨 Build")]
+[private]
+build-cross-all-pre:
+    @echo "🔧 Building all target architectures..."
+    @echo "💡 On macOS/Windows, use 'make docker-dev' for reliable multi-arch builds"
+    @echo "🔨 Generating protobuf code..."
+    -cargo run --bin gproto
+
+[doc("build all targets at once")]
+[group("🔨 Build")]
+build-cross-all: build-cross-all-pre && build-gnu build-gnu-arm64 build-musl build-musl-arm64
+
+# ========================================================================================
+# Docker Multi-Architecture Builds (Primary Methods)
+# ========================================================================================
+
+[doc("build an image and run it")]
+[group("🐳 Build Image")]
+build-docker os="rockylinux9.3" cli=(DOCKER_CLI) dockerfile=(DOCKERFILE_SOURCE):
+    #!/usr/bin/env bash
+    SOURCE_BUILD_IMAGE_NAME="rustfs/rustfs-{{ os }}:v1"
+    SOURCE_BUILD_CONTAINER_NAME="rustfs-{{ os }}-build"
+    BUILD_CMD="/root/.cargo/bin/cargo build --release --bin rustfs --target-dir /root/s3-rustfs/target/{{ os }}"
+    echo "🐳 Building RustFS using Docker ({{ os }})..."
+    {{ cli }} buildx build -t $SOURCE_BUILD_IMAGE_NAME -f {{ dockerfile }} .
+    {{ cli }} run --rm --name $SOURCE_BUILD_CONTAINER_NAME -v $(pwd):/root/s3-rustfs -it $SOURCE_BUILD_IMAGE_NAME $BUILD_CMD
+
+[doc("build an image")]
+[group("🐳 Build Image")]
+docker-buildx:
+    @echo "🏗️ Building multi-architecture production Docker images with buildx..."
+    ./docker-buildx.sh
+
+[doc("build an image and push it")]
+[group("🐳 Build Image")]
+docker-buildx-push:
+    @echo "🚀 Building and pushing multi-architecture production Docker images with buildx..."
+    ./docker-buildx.sh --push
+
+[doc("build an image with a version")]
+[group("🐳 Build Image")]
+docker-buildx-version version:
+    @echo "🏗️ Building multi-architecture production Docker images (version: {{ version }}..."
+    ./docker-buildx.sh --release {{ version }}
+
+[doc("build an image with a version and push it")]
+[group("🐳 Build Image")]
+docker-buildx-push-version version:
+    @echo "🚀 Building and pushing multi-architecture production Docker images (version: {{ version }}..."
+    ./docker-buildx.sh --release {{ version }} --push
+
+[doc("build an image with a version and push it to registry")]
+[group("🐳 Build Image")]
+docker-dev-push registry cli=(DOCKER_CLI) source=(DOCKERFILE_SOURCE):
+    @echo "🚀 Building and pushing multi-architecture development Docker images..."
+    @echo "💡 push to registry: {{ registry }}"
+    {{ cli }} buildx build \
+    	--platform linux/amd64,linux/arm64 \
+    	--file {{ source }} \
+    	--tag {{ registry }}/rustfs:source-latest \
+    	--tag {{ registry }}/rustfs:dev-latest \
+    	--push \
+    	.
+
+# Local production builds using direct buildx (alternative to docker-buildx.sh)
+
+[group("🐳 Build Image")]
+docker-buildx-production-local cli=(DOCKER_CLI) source=(DOCKERFILE_PRODUCTION):
+    @echo "🏗️ Building single-architecture production Docker image locally..."
+    @echo "💡 Alternative to docker-buildx.sh for local testing"
+    {{ cli }} buildx build \
+    	--file {{ source }} \
+    	--tag rustfs:production-latest \
+    	--tag rustfs:latest \
+    	--load \
+    	--build-arg RELEASE=latest \
+    	.
+
+# Development/Source builds using direct buildx commands
+
+[group("🐳 Build Image")]
+docker-dev cli=(DOCKER_CLI) source=(DOCKERFILE_SOURCE):
+    @echo "🏗️ Building multi-architecture development Docker images with buildx..."
+    @echo "💡 This builds from source code and is intended for local development and testing"
+    @echo "⚠️  Multi-arch images cannot be loaded locally, use docker-dev-push to push to registry"
+    {{ cli }} buildx build \
+    	--platform linux/amd64,linux/arm64 \
+    	--file {{ source }} \
+    	--tag rustfs:source-latest \
+    	--tag rustfs:dev-latest \
+    	.
+
+[group("🐳 Build Image")]
+docker-dev-local cli=(DOCKER_CLI) source=(DOCKERFILE_SOURCE):
+    @echo "🏗️ Building single-architecture development Docker image for local use..."
+    @echo "💡 This builds from source code for the current platform and loads locally"
+    {{ cli }} buildx build \
+    	--file {{ source }} \
+    	--tag rustfs:source-latest \
+    	--tag rustfs:dev-latest \
+    	--load \
+    	.
+
+# ========================================================================================
+# Single Architecture Docker Builds (Traditional)
+# ========================================================================================
+
+[group("🐳 Build Image")]
+docker-build-production cli=(DOCKER_CLI) source=(DOCKERFILE_PRODUCTION):
+    @echo "🏗️ Building single-architecture production Docker image..."
+    @echo "💡 Consider using 'make docker-buildx-production-local' for multi-arch support"
+    {{ cli }} build -f {{ source }} -t rustfs:latest .
+
+[group("🐳 Build Image")]
+docker-build-source cli=(DOCKER_CLI) source=(DOCKERFILE_SOURCE):
+    @echo "🏗️ Building single-architecture source Docker image..."
+    @echo "💡 Consider using 'make docker-dev-local' for multi-arch support"
+    {{ cli }} build -f {{ source }} -t rustfs:source .
+
+# ========================================================================================
+# Development Environment
+# ========================================================================================
+
+[group("🏃 Running")]
+dev-env-start cli=(DOCKER_CLI) source=(DOCKERFILE_SOURCE) container=(CONTAINER_NAME):
+    @echo "🚀 Starting development environment..."
+    {{ cli }} buildx build \
+    	--file {{ source }} \
+    	--tag rustfs:dev \
+    	--load \
+    	.
+    -{{ cli }} stop {{ container }} 2>/dev/null
+    -{{ cli }} rm {{ container }} 2>/dev/null
+    {{ cli }} run -d --name {{ container }} \
+    	-p 9010:9010 -p 9000:9000 \
+    	-v {{ invocation_directory() }}:/workspace \
+    	-it rustfs:dev
+
+[group("🏃 Running")]
+dev-env-stop cli=(DOCKER_CLI) container=(CONTAINER_NAME):
+    @echo "🛑 Stopping development environment..."
+    -{{ cli }} stop {{ container }} 2>/dev/null
+    -{{ cli }}  rm {{ container }} 2>/dev/null
+
+[group("🏃 Running")]
+dev-env-restart: dev-env-stop dev-env-start
+
+[group("👍 E2E")]
+e2e-server:
+    sh scripts/run.sh
+
+[group("👍 E2E")]
+probe-e2e:
+    sh scripts/probe.sh
+
+[doc("inspect one image")]
+[group("🚚 Other")]
+docker-inspect-multiarch image cli=(DOCKER_CLI):
+    @echo "🔍 Inspecting multi-architecture image: {{ image }}"
+    {{ cli }} buildx imagetools inspect {{ image }}
+
+# ========================================================================================
+# Local CI with act
+# ========================================================================================
+
+ACT_PLATFORM_MAP := "-P sm-standard-2=ubuntu-latest -P sm-standard-4=ubuntu-latest -P sm-standard-4-arm=ubuntu-latest -P dind-sm-standard-2=ubuntu-latest -P smoke-testing=ubuntu-latest -P pf-testing=ubuntu-latest"
+
+[doc("run act with self-hosted runner mappings (pass extra args after --)")]
+[group("🎭 Act")]
+act *args:
+    act {{ ACT_PLATFORM_MAP }} {{ args }}
+
+[doc("run CI locally with act")]
+[group("🎭 Act")]
+act-ci:
+    @echo "🎭 Running CI locally with act..."
+    act push {{ ACT_PLATFORM_MAP }} -W .github/workflows/ci.yml
+
+[doc("run cache-warm locally with act")]
+[group("🎭 Act")]
+act-cache-warm:
+    @echo "🎭 Running cache-warm locally with act..."
+    act push {{ ACT_PLATFORM_MAP }} -W .github/workflows/cache-warm.yml
+
+[doc("run only the Warm ci-uring job locally")]
+[group("🎭 Act")]
+act-warm-ci-uring:
+    @echo "🎭 Running Warm ci-uring job locally with act..."
+    act push {{ ACT_PLATFORM_MAP }} -j warm-ci-uring
+# Runtime tags describe warm, incremental runs on a development machine:
+# - [quick]: normally finishes within one minute
+# - [bounded]: normally finishes within five minutes
+# - [long]: may take longer than five minutes
+# - [indefinite]: keeps running until stopped
+# - [external]: completion depends on a device, network service, or user interaction
+# - [variable]: runtime depends on the arguments passed to the wrapper
+# Cold caches can move quick commands into bounded and bounded commands into long
+
+# [quick] List available recipes
+[default]
+list:
+    @just --list
+
+# ------------------------------------------------------------------------------
+# utilities
+# ------------------------------------------------------------------------------
+
+# [quick] Symlink githooks from ./githooks into .git/hooks
+[group('utils')]
+[script('bash')]
+install-githooks:
+    set -e
+    mkdir -p ../.git/hooks
+    ls ../githooks/*;
+    for hook in ../githooks/*; do
+        [ -f "$hook" ] || continue
+        echo hook=$hook
+        name=./githooks/$(basename "$hook")
+        base_name=$(basename $PWD)
+        echo name=$name
+        echo base_name=$base_name
+        target=".git/hooks/$name"
+        echo $target
+        if [ -L "$target" ] && [ "$(readlink "$target")" = "$hook" ]; then
+            echo "  $name already linked"
+            continue
+        fi
+        if [ -e "$target" ]; then
+            echo "  replacing existing $name"
+            rm -f "$target"
+        fi
+        ln -sf "$hook" "$target"
+        echo "  linked $name"
+    done
+    echo "Done"
+
+# [variable] Run an xtask command
+[group('utils')]
+xtask *args:
+    cd rust && cargo --locked xtask {{ args }}
+
+# [bounded] Rebase current branch onto new-base after choosing the old squash-merged base
+[group('utils')]
+rebase new_base="master":
+    just xtask rebase "{{ new_base }}"
+
+# Requires MNEMONIC env var (set in .envrc or pass directly)
+# [quick, external] Sign a PSBT and output all formats (base64, hex, binary, bbqr-gif, ur-gif)
+[group('utils')]
+[script('bash')]
+sign-psbt psbt:
+    set -e
+    if [ -z "$MNEMONIC" ]; then
+        echo "Error: MNEMONIC env var not set. Set it in .envrc or export it."
+        exit 1
+    fi
+    OUTPUT_DIR="$HOME/Downloads/signed-psbt-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$OUTPUT_DIR"
+    echo "Signing PSBT and outputting to: $OUTPUT_DIR"
+    cd rust
+    cargo --locked xtask util sign-psbt --psbt "{{ psbt }}" -f base64 -O "$OUTPUT_DIR/signed.base64.txt"
+    cargo --locked xtask util sign-psbt --psbt "{{ psbt }}" -f hex -O "$OUTPUT_DIR/signed.hex.txt"
+    cargo --locked xtask util sign-psbt --psbt "{{ psbt }}" -f binary -O "$OUTPUT_DIR/signed.psbt"
+    cargo --locked xtask util sign-psbt --psbt "{{ psbt }}" -f bbqr-gif -O "$OUTPUT_DIR/signed-bbqr.gif"
+    cargo --locked xtask util sign-psbt --psbt "{{ psbt }}" -f ur-gif -O "$OUTPUT_DIR/signed-ur.gif"
+    echo ""
+    echo "All formats saved to: $OUTPUT_DIR"
+    ls -la "$OUTPUT_DIR"
+    open "$OUTPUT_DIR"
+
+alias sp := sign-psbt
+
+# ------------------------------------------------------------------------------
+# ci
+# ------------------------------------------------------------------------------
+
+# [long] Full build and verification for all platforms
+[group('ci')]
+full:
+    just bidd && just ba && just ci && just compile
+
+alias f := full
+
+# [long] Run all CI checks
+[group('ci')]
+[script('bash')]
+[working-directory('rust')]
+ci:
+    set -e
+    just fmt
+    cargo fmt --check
+    just lint
+    just compile
+    just test
+
+# [external] Regenerate UniFFI bindings in GitHub Actions for committed branch changes
+[group('ci')]
+regenerate-bindings:
+    just xtask regenerate-bindings
+
+alias rb := regenerate-bindings
+
+# [variable, external] Run mobile artifact producer or consumer commands
+[group('ci')]
+mobile-artifact *args:
+    just xtask mobile-artifact {{ args }}
+
+# [external] Trigger Android and iOS mobile artifacts for a pushed ref
+[group('ci')]
+mobile-artifact-trigger ref platform="both":
+    just mobile-artifact trigger --platform "{{ platform }}" --ref "{{ ref }}"
+
+# [external] Install latest matching Android mobile artifact
+[group('ci')]
+mobile-artifact-install-android ref:
+    just mobile-artifact install-android --ref "{{ ref }}"
+
+# [external] Fetch latest matching iOS CoveCore mobile artifact
+[group('ci')]
+mobile-artifact-fetch-ios-core ref:
+    just mobile-artifact fetch-ios-core --ref "{{ ref }}"
+
+# ------------------------------------------------------------------------------
+# build
+# ------------------------------------------------------------------------------
+
+# [bounded] Build Android debug Rust FFI and Kotlin bindings for ARM64 devices
+[group('build')]
+build-android:
+    just xtask build-android debug --arm64 && just say "done android"
+
+alias ba := build-android
+
+# [bounded, external] Build Android debug Rust FFI and Kotlin bindings for the connected device ABI
+[group('build')]
+build-android-connected-device:
+    just xtask build-android debug --connected-device && just say "done android connected device"
+
+alias bad := build-android-connected-device
+
+# [long] Build Android release APK
+[group('build')]
+build-android-release:
+    just xtask build-android release-speed && just say "done android release"
+
+alias bar := build-android-release
+
+# [long, external] Build signed AAB for Google Play, copy to Downloads
+[group('build')]
+bundle-android: build-android-release
+    just xtask bundle-android && just say "done android bundle"
+
+alias bua := bundle-android
+
+# [long] Build iOS debug for simulator
+[group('build')]
+build-ios profile="debug" *flags="":
+    just xtask build-ios {{ profile }} {{ flags }} && just say "done ios"
+
+alias bi := build-ios
+
+# [long] Build iOS release for device
+[group('build')]
+build-ios-release *flags="":
+    just xtask build-ios release-speed --device {{ flags }} && just say "done ios release"
+
+alias bir := build-ios-release
+
+# keep this path aligned with Xcode archives; passkeys fail in TestFlight if CLI signing diverges
+# xtask verifies Apple's AASA CDN before upload
+# [long, external] Bump iOS build, build release bindings, then upload to TestFlight
+[group('build')]
+testflight:
+    just xtask testflight
+
+# [long] Build iOS debug for device
+[group('build')]
+build-ios-debug-device *flags="":
+    just xtask build-ios debug --device {{ flags }} && just say "done ios device"
+
+alias bidd := build-ios-debug-device
+
+alias gen-swift := build-ios
+
+# [long] Compile both iOS and Android
+[group('build')]
+@compile:
+    just compile-ios && just compile-android
+
+# [bounded] Compile iOS for simulator
+[group('build')]
+[working-directory('ios')]
+compile-ios:
+    if [ ! -f "CoveCore/Sources/cove_core_ffi.xcframework/Info.plist" ] || [ ! -f "CoveCore/Sources/cove_core_ffi.xcframework/ios-arm64/libcove.a" ] || [ ! -f "CoveCore/Sources/cove_core_ffi.xcframework/ios-arm64-simulator/libcove.a" ] || [ ! -f "CoveCore/Sources/cove_core_ffi.xcframework/ios-arm64-maccatalyst/libcove.a" ]; then just build-ios-debug-device; fi && xcodebuild -scheme Cove -sdk iphonesimulator -arch arm64 build && just notf "done compile ios"
+
+# [bounded] Compile Android debug
+[group('build')]
+[working-directory('android')]
+compile-android:
+    ./gradlew assembleDevDebug && just notf "done compile android"
+
+# ------------------------------------------------------------------------------
+# test
+# ------------------------------------------------------------------------------
+
+# [external] Run iOS and Android manual UI tests
+[group('test')]
+ui-manual:
+    just android-ui-manual && just ios-ui-background
+
+# Use this for ad hoc device UI testing:
+#   just android-stay-awake ./gradlew :app:connectedUiTestDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.annotation=org.bitcoinppl.cove.test.LayoutRegressionTest
+#
+# Focused instrumentation tests should use AndroidDeviceStayAwakeRule when the
+# stay-awake behavior belongs in the test itself
+# [variable, external] Run an Android device command from android/ with stay-awake enabled
+[group('test')]
+android-stay-awake *command:
+    just xtask android-stay-awake -- {{ command }}
+
+# [external] Run manual Android full-launch onboarding UI tests
+[group('test')]
+android-ui-manual:
+    just xtask android-ui-manual
+
+alias aum := android-ui-manual
+
+# [bounded] Update Android Compose preview screenshot references
+[group('test')]
+[working-directory('android')]
+android-preview-screenshots-update:
+    ./gradlew :app:updateDevDebugScreenshotTest
+
+# [bounded] Validate Android Compose preview screenshots
+[group('test')]
+[working-directory('android')]
+android-preview-screenshots-validate:
+    ./gradlew :app:validateDevDebugScreenshotTest
+
+# [external] Run manual iOS full-launch UI tests without opening Simulator
+[group('test')]
+[script('bash')]
+ios-ui-background device="iPhone 17" test="CoveUITests/OnboardingFullLaunchUITests":
+    cd rust && cargo --locked xtask ios-ui --device "{{ device }}" --test "{{ test }}"
+
+alias iub := ios-ui-background
+
+# [external] Run manual iOS full-launch UI tests with Simulator visible
+[group('test')]
+[script('bash')]
+ios-ui-foreground device="iPhone 17" test="CoveUITests/OnboardingFullLaunchUITests":
+    cd rust && cargo --locked xtask ios-ui --foreground --device "{{ device }}" --test "{{ test }}"
+
+alias iuf := ios-ui-foreground
+
+## # [bounded] Run all tests
+## [group('test')]
+## [working-directory('rust')]
+## test test="" flags="":
+##     cargo nextest run --locked {{ test }} --workspace {{ flags }}
+
+# [bounded] Run tests the same way as GitHub Actions
+[group('test')]
+[working-directory('rust')]
+test-gh test="" flags="":
+    cargo test --locked {{ test }} --workspace {{ flags }}
+
+# [bounded] Run tests with cargo test
+[group('test')]
+[working-directory('rust')]
+ctest test="" flags="":
+    cargo test --locked {{ test }} --workspace -- {{ flags }}
+
+# [indefinite] Run tests with bacon
+[group('test')]
+[working-directory('rust')]
+btest test="":
+    bacon nextest -- {{ test }} --workspace
+
+# [indefinite] Watch and re-run tests on file changes
+[group('test')]
+watch-test test="" flags="":
+    watchexec --exts rs just test {{ test }} {{ flags }}
+
+alias wt := watch-test
+alias wtest := watch-test
+
+# ------------------------------------------------------------------------------
+# lint
+# ------------------------------------------------------------------------------
+
+# [bounded] Lint all platforms
+[group('lint')]
+@lint *flags="":
+    just lint-rust {{ flags }} && just lint-swift {{ flags }} && just lint-android {{ flags }}
+
+# [quick] Lint Rust code
+[group('lint')]
+[working-directory('rust')]
+lint-rust *flags="":
+    cargo clippy --locked --all-targets --all-features -- -D warnings {{ flags }}
+
+# [bounded] Lint Android code
+[group('lint')]
+[working-directory('android')]
+lint-android *flags="":
+    ./gradlew ktlintCheck {{ flags }}
+    ./gradlew detekt
+
+# [bounded] Lint Swift code and Cove-specific SwiftUI structure
+[group('lint')]
+lint-swift *flags="":
+    swiftformat --lint ios --swiftversion 6 {{ flags }}
+    swiftlint lint --config .swiftlint.yml
+    swift test --package-path tools/cove-swift-lint
+    swift run --package-path tools/cove-swift-lint cove-swift-lint ios --config .swift-ast-lint.yml
+
+## # [quick] Run clippy
+## [group('lint')]
+## [working-directory('rust')]
+## clippy *flags="":
+##     cargo clippy --locked {{ flags }}
+
+# [bounded] Run pedantic clippy checks (excluding must_use, truncation, single_match, if_not_else, needless_continue, option_if_let_else)
+[group('lint')]
+[working-directory('rust')]
+pedantic *flags="":
+    cargo clippy --locked -- -D clippy::pedantic -D clippy::nursery \
+        -A clippy::must_use_candidate \
+        -A clippy::cast_possible_truncation \
+        -A clippy::single_match \
+        -A clippy::if_not_else \
+        -A clippy::needless_continue \
+        -A clippy::option_if_let_else \
+        -A clippy::unused_self \
+        -A clippy::unused_async \
+        -A clippy::significant_drop_tightening \
+        -A clippy::missing_const_for_fn \
+        -A clippy::needless_pass_by_value \
+        {{ flags }}
+
+# [bounded] Run full pedantic clippy checks without any allows
+[group('lint')]
+[working-directory('rust')]
+pedantic-all *flags="":
+    cargo clippy --locked -- -D clippy::pedantic -D clippy::nursery {{ flags }}
+
+# ------------------------------------------------------------------------------
+# format
+# ------------------------------------------------------------------------------
+
+## # [quick] Format all platforms
+## [group('format')]
+## @fmt:
+##     just fmt-rust && just fmt-swift && just fmt-android
+
+# Format Rust code
+[group('format')]
+[private]
+[working-directory('rust')]
+fmt-rust:
+    cargo fmt --all
+
+# Format Swift code
+alias fmt-ios := fmt-swift
+alias fi := fmt-swift
+
+[group('format')]
+[private]
+fmt-swift:
+    swiftformat ios --swiftversion 6
+
+# Format Android code
+[group('format')]
+[private]
+[working-directory('android')]
+fmt-android:
+    ./gradlew ktlintFormat
+
+# ------------------------------------------------------------------------------
+# dev
+# ------------------------------------------------------------------------------
+
+# [indefinite] Run bacon clippy watcher
+[group('dev')]
+[working-directory('rust')]
+bacon:
+    bacon clippy
+
+# [indefinite] Run bacon check watcher
+[group('dev')]
+[working-directory('rust')]
+bcheck:
+    bacon check
+
+## # [bounded] Run cargo check
+## [group('dev')]
+## [working-directory('rust')]
+## check *flags="--workspace --all-targets --all-features":
+##     cargo check --locked {{ flags }}
+
+# [indefinite] Watch and rebuild iOS on file changes
+[group('dev')]
+watch-build profile="debug" *flags="":
+    watchexec --exts rs just build-ios {{ profile }} {{ flags }}
+
+alias wb := watch-build
+
+# [bounded] Apply cargo fix
+[group('dev')]
+[working-directory('rust')]
+fix *flags="":
+    cargo fix --locked --workspace {{ flags }}
+
+# ------------------------------------------------------------------------------
+# release
+# ------------------------------------------------------------------------------
+
+# [quick] Bump version (type: major, minor, patch, build)
+[group('release')]
+bump type targets="":
+    just xtask bump-version {{ type }} {{ if targets != "" { "--targets " + targets } else { "" } }}
+
+# ------------------------------------------------------------------------------
+# xcode
+# ------------------------------------------------------------------------------
+
+# [bounded] Clean Xcode caches
+[group('xcode')]
+[working-directory('ios')]
+xcode-clean:
+    rm -rf ~/Library/Caches/org.swift.swiftpm
+    xcodebuild clean
+
+alias xc := xcode-clean
+
+# [long, external] Reset Xcode completely
+[confirm("This will kill Xcode and delete caches. Continue?")]
+[group('xcode')]
+[script('bash')]
+[working-directory('ios')]
+xcode-reset:
+    killAll Xcode || true
+    rm -rf Cove.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+    xcrun simctl --set previews delete all
+    rm -rf ~/Library/Caches/org.swift.swiftpm
+    rm -rf ~/Library/Developer/Xcode/DerivedData
+    xcodebuild clean
+    xcode-build-server config -project *.xcodeproj -scheme Cove
+    open Cove.xcodeproj
+
+alias xr := xcode-reset
+
+# ------------------------------------------------------------------------------
+# util
+# ------------------------------------------------------------------------------
+
+# [bounded] Clean all build artifacts
+[confirm("Delete all build artifacts?")]
+[group('util')]
+[script('bash')]
+[working-directory('rust')]
+clean:
+    cargo clean
+    rm -rf ../ios/Cove.xcframework
+    rm -rf ../ios/Cove
+    rm -rf target
+
+# [external] Update cargo dependencies
+[group('util')]
+[working-directory('rust')]
+update pkg="":
+    cargo update {{ pkg }}
+
+# [external] Run Android app
+# repeat targets as needed: -D main -D sim
+[group('util')]
+run-android *args:
+    just xtask run-android {{ args }} && just notf "done run android"
+
+alias ra := run-android
+
+# [long, external] Rebuild Android bindings, then install and run the Android app
+# repeat targets as needed: -D main -D sim
+[group('util')]
+build-run-android *args:
+    just ba && just ra {{ args }}
+
+alias bra := build-run-android
+
+# [long, external] Rebuild, install, and run iOS and Android apps
+# repeat targets as needed: -d main -d se -D main -D sim
+[group('util')]
+build-run-all *args:
+    just xtask build-run-all {{ args }} && just notf "done build run all"
+
+alias brall := build-run-all
+
+# [quick, external] Launch installed Android app
+[group('util')]
+launch-android:
+    adb shell am start -W -n org.bitcoinppl.cove.dev/org.bitcoinppl.cove.MainActivity
+
+alias la := launch-android
+
+# [quick, external] Clear Android app data and launch installed app
+[group('util')]
+reset-run-android:
+    just reset-android
+    just launch-android
+
+# [quick, external] Clear Android app data
+[group('util')]
+reset-android:
+    adb shell pm clear org.bitcoinppl.cove.dev
+
+alias rra := reset-run-android
+alias rea := reset-android
+
+# [quick, external] Download Android screenshots into _scratch and delete them from the device
+[group('util')]
+download-android-screenshots:
+    just xtask download-android-screenshots
+
+alias das := download-android-screenshots
+
+# [long, external] Build and clean install Android (rebuilds native libs, clears Gradle cache)
+[group('util')]
+[working-directory('android')]
+install-android-clean:
+    just ba && ./gradlew --stop && ./gradlew clean installDebug && just notf "done install android clean"
+
+alias iac := install-android-clean
+
+# [external] Run iOS app with existing generated bindings
+# repeat targets as needed: -d main -d se
+[group('util')]
+run-ios *args:
+    just xtask run-ios {{ args }} && just notf "done run ios"
+
+alias ri := run-ios
+
+# [long, external] Rebuild iOS bindings, then install and run the iOS app
+# repeat targets as needed: -d main -d se
+[group('util')]
+build-run-ios *args:
+    just xtask build-run-ios {{ args }} && just notf "done build run ios"
+
+alias bri := build-run-ios
+alias ib := build-run-ios
+
+# [indefinite, external] Show logcat for Cove process
+[group('util')]
+logcat:
+    #!/usr/bin/env bash
+    pid=$(adb shell pidof org.bitcoinppl.cove.dev | tr -d '[:space:]')
+    if [ -z "$pid" ]; then
+        echo "error: org.bitcoinppl.cove.dev is not running" >&2
+        exit 1
+    fi
+    adb logcat --pid="$pid"
+
+# ------------------------------------------------------------------------------
+# helpers
+# ------------------------------------------------------------------------------
+
+# text-to-speech helper
+[private]
+say *args:
+    @say {{ args }} 2>/dev/null || echo {{ args }} || true
+    @just notf {{ args }} || true
+
+[private]
+notf *args:
+    @command -v notf >/dev/null && notf "{{ args }}" -t "Cove" -T bell,macos || true
+
